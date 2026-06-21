@@ -35,29 +35,54 @@ st.set_page_config(
 # ── Session state ─────────────────────────────────────────────────────────────
 if "perfiles" not in st.session_state:
     st.session_state.perfiles = []
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "agent" not in st.session_state:
-    st.session_state.agent = None
-if "active_profile_id" not in st.session_state:
-    st.session_state.active_profile_id = None
+if "focus_history" not in st.session_state:
+    # Lista de {"pregunta": str, "respuestas": [{"perfil": dict, "respuesta": str}]}
+    st.session_state.focus_history = []
 
 
-def _reset_chat():
-    st.session_state.chat_history = []
-    st.session_state.agent = None
-    st.session_state.active_profile_id = None
+def _reset_focus_group() -> None:
+    st.session_state.focus_history = []
 
 
-def _profile_label(i: int, p: dict) -> str:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _card_header(i: int, perfil: dict) -> str:
     detail = (
-        p.get("rubro")
-        or p.get("nivel_socioeconomico")
-        or p.get("tipo_entidad_principal")
-        or p.get("tipo_seguro")
+        perfil.get("rubro")
+        or perfil.get("nivel_socioeconomico")
+        or perfil.get("tipo_entidad_principal")
+        or perfil.get("tipo_seguro")
         or "—"
     )
-    return f"#{i + 1}  {detail}  |  {p.get('region', '?')}  |  id:{p.get('perfil_id', '')[:8]}"
+    edad = perfil.get("edad_dueño") or perfil.get("edad") or "?"
+    adopcion = perfil.get("adopcion_digital", "")
+    header = f"Perfil {i + 1} — {detail} | {perfil.get('region', '?')} | {edad} años"
+    if adopcion:
+        header += f" | adopción: {adopcion}"
+    return header
+
+
+def _render_profile_fields(perfil: dict) -> None:
+    items = {k: v for k, v in perfil.items() if k not in ("data_sources", "synthetic")}
+    col_a, col_b = st.columns(2)
+    entries = list(items.items())
+    half = len(entries) // 2
+    with col_a:
+        for k, v in entries[:half]:
+            st.text(f"{k}: {v}")
+    with col_b:
+        for k, v in entries[half:]:
+            st.text(f"{k}: {v}")
+
+
+def _render_card(i: int, perfil: dict, respuesta: str, *, show_expander: bool = True) -> None:
+    """Renderiza la card de un perfil con su respuesta."""
+    with st.container(border=True):
+        st.markdown(f"**{_card_header(i, perfil)}**")
+        st.markdown(respuesta)
+        if show_expander:
+            with st.expander("Ver perfil completo"):
+                _render_profile_fields(perfil)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,7 +149,7 @@ if generar_btn:
             gen = PopulationGenerator(config)
             perfiles = gen.generate()
             st.session_state.perfiles = perfiles
-            _reset_chat()
+            _reset_focus_group()
             st.success(
                 f"Se generaron **{len(perfiles)} perfiles** · "
                 f"segmento: **{SEGMENTO_LABEL[segmento]}** · región: **{region}**"
@@ -170,10 +195,11 @@ else:
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECCIÓN 2 — AGENTE CONVERSACIONAL
+# SECCIÓN 2 — FOCUS GROUP SINTÉTICO
 # ─────────────────────────────────────────────────────────────────────────────
 st.divider()
-st.header("Sección 2 — Agente conversacional")
+st.header("Sección 2 — Focus group sintético")
+st.caption("Escribe una pregunta y todos los perfiles responden en secuencia.")
 
 api_key = st.text_input(
     "API Key de DeepSeek",
@@ -183,90 +209,91 @@ api_key = st.text_input(
 )
 
 if not st.session_state.perfiles:
-    st.info("Primero genera perfiles en la **Sección 1** para activar el agente conversacional.")
+    st.info("Primero genera perfiles en la **Sección 1** para activar el focus group.")
     st.stop()
 
-# ── Selector de perfil ────────────────────────────────────────────────────────
-profile_labels = [_profile_label(i, p) for i, p in enumerate(st.session_state.perfiles)]
+# ── Historial de preguntas anteriores (colapsado) ─────────────────────────────
+# Se muestran todas las entradas menos la última (que se muestra abajo expandida)
+previous_entries = st.session_state.focus_history[:-1]
+if previous_entries:
+    with st.expander(
+        f"Preguntas anteriores ({len(previous_entries)})",
+        expanded=False,
+    ):
+        for entry in reversed(previous_entries):
+            st.markdown(f"**❓ {entry['pregunta']}**")
+            for i, r in enumerate(entry["respuestas"]):
+                # Sin expander anidado para evitar conflicto con el expander padre
+                _render_card(i, r["perfil"], r["respuesta"], show_expander=False)
+            if entry is not previous_entries[0]:
+                st.divider()
 
+# ── Última respuesta / resultados de la pregunta más reciente ─────────────────
+if st.session_state.focus_history:
+    latest = st.session_state.focus_history[-1]
+    st.markdown(f"### ❓ {latest['pregunta']}")
+    for i, r in enumerate(latest["respuestas"]):
+        _render_card(i, r["perfil"], r["respuesta"], show_expander=True)
+    st.divider()
 
-def _on_profile_change():
-    _reset_chat()
-
-
-selected_idx = st.selectbox(
-    "Perfil con el que vas a conversar",
-    options=range(len(profile_labels)),
-    format_func=lambda i: profile_labels[i],
-    key="profile_selector",
-    on_change=_on_profile_change,
+# ── Input de pregunta ─────────────────────────────────────────────────────────
+pregunta = st.text_area(
+    "Escribe tu pregunta al grupo...",
+    placeholder="Ej: ¿Cuál es tu mayor dificultad para cobrar a tus clientes?",
+    height=100,
 )
 
-selected_profile = st.session_state.perfiles[selected_idx]
-
-# Inicializar agente cuando el perfil se selecciona por primera vez
-if st.session_state.active_profile_id != selected_profile.get("perfil_id"):
-    st.session_state.agent = None
-    st.session_state.chat_history = []
-    st.session_state.active_profile_id = selected_profile.get("perfil_id")
-
-# ── Detalle del perfil seleccionado ──────────────────────────────────────────
-with st.expander("Ver detalle del perfil seleccionado", expanded=False):
-    items = {k: v for k, v in selected_profile.items() if k not in ("data_sources", "synthetic")}
-    col_a, col_b = st.columns(2)
-    entries = list(items.items())
-    half = len(entries) // 2
-    with col_a:
-        for k, v in entries[:half]:
-            st.text(f"{k}: {v}")
-    with col_b:
-        for k, v in entries[half:]:
-            st.text(f"{k}: {v}")
-
-# ── Controles de conversación ─────────────────────────────────────────────────
-col_reset, _ = st.columns([1, 5])
+col_ask, col_reset = st.columns([3, 1])
+with col_ask:
+    preguntar_btn = st.button(
+        f"Preguntar al grupo  ({len(st.session_state.perfiles)} perfiles)",
+        type="primary",
+        use_container_width=True,
+    )
 with col_reset:
-    if st.button("🔄 Nueva conversación", use_container_width=True):
-        _reset_chat()
-        st.rerun()
+    nueva_sesion_btn = st.button(
+        "🗑️ Nueva sesión",
+        use_container_width=True,
+    )
 
-# ── Historial de chat ─────────────────────────────────────────────────────────
-st.subheader("Conversación")
+# ── Acciones ──────────────────────────────────────────────────────────────────
+if nueva_sesion_btn:
+    _reset_focus_group()
+    st.rerun()
 
-for msg in st.session_state.chat_history:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-# ── Input del usuario ─────────────────────────────────────────────────────────
-user_input = st.chat_input("Escribe tu pregunta al agente...")
-
-if user_input:
+if preguntar_btn:
     if not api_key:
-        st.error("⚠️ Ingresa tu API Key de DeepSeek antes de enviar un mensaje.")
+        st.error("⚠️ Ingresa tu API Key de DeepSeek antes de preguntar al grupo.")
+        st.stop()
+    if not pregunta.strip():
+        st.warning("⚠️ Escribe una pregunta antes de enviar.")
         st.stop()
 
-    # Mostrar mensaje del usuario de inmediato
-    with st.chat_message("user"):
-        st.markdown(user_input)
+    from gen_peru_poblacion.agent_builder import AgentBuilder  # noqa: PLC0415
+    from gen_peru_poblacion.providers import DeepSeekProvider  # noqa: PLC0415
 
-    # Obtener respuesta del agente
-    with st.spinner("El agente está pensando..."):
-        try:
-            if st.session_state.agent is None:
-                from gen_peru_poblacion.agent_builder import AgentBuilder  # noqa: PLC0415
-                from gen_peru_poblacion.providers import DeepSeekProvider  # noqa: PLC0415
+    current_entry: dict = {"pregunta": pregunta.strip(), "respuestas": []}
 
+    for i, perfil in enumerate(st.session_state.perfiles):
+        header = _card_header(i, perfil)
+
+        with st.status(f"⏳ {header}", expanded=True) as status:
+            try:
                 provider = DeepSeekProvider(api_key=api_key)
-                st.session_state.agent = AgentBuilder.from_profile(selected_profile, provider)
+                agent = AgentBuilder.from_profile(perfil, provider)
+                response = agent.chat(pregunta.strip())
 
-            response = st.session_state.agent.chat(user_input)
+                status.update(label=f"✅ {header}", state="complete", expanded=True)
+                st.markdown(response)
+                with st.expander("Ver perfil completo"):
+                    _render_profile_fields(perfil)
 
-        except Exception as exc:
-            response = f"❌ Error al procesar la respuesta: {exc}"
+            except Exception as exc:
+                response = f"Error: {exc}"
+                status.update(label=f"❌ {header}", state="error", expanded=True)
+                st.error(str(exc))
 
-    # Mostrar y guardar respuesta
-    with st.chat_message("assistant"):
-        st.markdown(response)
+        current_entry["respuestas"].append({"perfil": perfil, "respuesta": response})
 
-    st.session_state.chat_history.append({"role": "user", "content": user_input})
-    st.session_state.chat_history.append({"role": "assistant", "content": response})
+    st.session_state.focus_history.append(current_entry)
+    st.rerun()
